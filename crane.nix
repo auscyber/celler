@@ -6,6 +6,9 @@
 , craneLib
 , installShellFiles
 , jq
+
+# Build the server with the S3 storage backend, pulling in aws-sdk-s3.
+, withS3 ? true
 }:
 
 let
@@ -19,14 +22,16 @@ let
     "target"
   ];
 
+  src = lib.cleanSourceWith {
+    filter = name: type: !(type == "directory" && builtins.elem (baseNameOf name) ignoredPaths);
+    src = lib.cleanSource ./.;
+  };
+
   commonArgs = {
     pname = "celler";
     version = "0.1.0";
 
-    src = lib.cleanSourceWith {
-      filter = name: type: !(type == "directory" && builtins.elem (baseNameOf name) ignoredPaths);
-      src = lib.cleanSource ./.;
-    };
+    inherit src;
 
     nativeBuildInputs = [
       # pkg-config
@@ -42,11 +47,48 @@ let
     CELLER_DISTRIBUTOR = "celler";
   };
 
-  cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+  # Vendored once and shared by every derivation below, so the registry is not
+  # realised twice.
+  cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
 
-  celler = craneLib.buildPackage (commonArgs // {
+  depsArgs = commonArgs // { inherit cargoVendorDir; };
 
-    inherit cargoArtifacts;
+  # Feature selection for the whole-workspace build. Must match between a deps
+  # layer and the package built on top of it, or the artifacts are refingerprinted.
+  workspaceCargoArgsFor = s3: "--locked"
+    + lib.optionalString (!s3) " --no-default-features --features attic/chunking,attic/io";
+
+  workspaceCargoArgs = workspaceCargoArgsFor withS3;
+
+  # Layer 1: only what the client binary needs.
+  celler-client-deps = craneLib.buildDepsOnly (depsArgs // {
+    pname = "celler-client";
+    cargoExtraArgs = "--locked --package attic-client";
+  });
+
+  # Layer 2: the rest of the workspace, stacked on top of layer 1. Crane's
+  # `buildDepsOnly` hardcodes `cargoArtifacts = null`, so drive
+  # `mkCargoDerivation` directly to inherit the client's target directory
+  # instead of rebuilding the shared dependencies.
+  cellerDepsFor = s3: craneLib.mkCargoDerivation (depsArgs // {
+    pnameSuffix = "-deps";
+    src = craneLib.mkDummySrc commonArgs;
+
+    cargoArtifacts = celler-client-deps;
+    doInstallCargoArtifacts = true;
+
+    buildPhaseCargoCommand = ''
+      cargoWithProfile check ${workspaceCargoArgsFor s3}
+      cargoWithProfile build ${workspaceCargoArgsFor s3}
+    '';
+
+    env.CRANE_BUILD_DEPS_ONLY = 1;
+  });
+
+  celler-deps = cellerDepsFor withS3;
+
+  mkCeller = { pname, cargoArtifacts, cargoExtraArgs }: craneLib.buildPackage (depsArgs // {
+    inherit pname cargoArtifacts cargoExtraArgs;
 
     postInstall = lib.optionalString (stdenv.hostPlatform == stdenv.buildPlatform) ''
       if [[ -f $out/bin/celler ]]; then
@@ -67,21 +109,35 @@ let
     };
   });
 
+  celler-client = mkCeller {
+    pname = "celler-client";
+    cargoArtifacts = celler-client-deps;
+    cargoExtraArgs = "--locked --package attic-client";
+  };
+
+  # Overridable per-derivation, so `celler.override { withS3 = false; }` works
+  # through the overlay too, not just on the package set.
+  celler = lib.makeOverridable (args: mkCeller {
+    pname = "celler";
+    cargoArtifacts = cellerDepsFor args.withS3;
+    cargoExtraArgs = workspaceCargoArgsFor args.withS3;
+  }) { inherit withS3; };
+
   # Celler interacts with Nix directly and its tests require trusted-user access
   # to nix-daemon to import NARs, which is not possible in the build sandbox.
   # In the CI pipeline, we build the test executable inside the sandbox, then
   # run it outside.
-  celler-tests = craneLib.mkCargoDerivation (commonArgs // {
+  celler-tests = craneLib.mkCargoDerivation (depsArgs // {
     pname = "celler-tests";
 
-    inherit cargoArtifacts;
+    cargoArtifacts = celler-deps;
 
     nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ jq ];
 
     doCheck = true;
 
     buildPhaseCargoCommand = "";
-    checkPhaseCargoCommand = "cargoWithProfile test --no-run --message-format=json >cargo-test.json";
+    checkPhaseCargoCommand = "cargoWithProfile test ${workspaceCargoArgs} --no-run --message-format=json >cargo-test.json";
     doInstallCargoArtifacts = false;
 
     installPhase = ''
@@ -95,5 +151,5 @@ let
     '';
   });
 in {
-  inherit celler celler-tests;
+  inherit celler celler-client celler-tests celler-deps celler-client-deps;
 }
