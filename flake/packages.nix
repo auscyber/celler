@@ -28,8 +28,14 @@
 
           inherit (cranePkgs)
             celler
+            celler-client
             celler-tests
+            celler-deps
+            celler-client-deps
           ;
+
+          # Server without the S3 storage backend, dropping aws-sdk-s3.
+          celler-no-s3 = cranePkgs.celler.override { withS3 = false; };
 
           book = pkgs.callPackage ../book {
             celler = self'.packages.celler;

@@ -1,30 +1,34 @@
 //! S3 remote files.
 
-use std::time::Duration;
-
-use async_trait::async_trait;
-use aws_config::{retry::RetryConfig, BehaviorVersion};
-use aws_sdk_s3::{
-    config::{Builder as S3ConfigBuilder, Credentials, Region, StalledStreamProtectionConfig},
-    operation::get_object::builders::GetObjectFluentBuilder,
-    presigning::PresigningConfig,
-    types::{CompletedMultipartUpload, CompletedPart},
-    Client,
-};
-use bytes::BytesMut;
-use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncRead;
 
-use super::{Download, RemoteFile, StorageBackend};
-use crate::error::{ErrorKind, ServerError, ServerResult};
-use attic::io::read_chunk_async;
-use attic::util::Finally;
+#[cfg(feature = "s3")]
+use {
+    super::{Download, RemoteFile, StorageBackend},
+    crate::error::{ErrorKind, ServerError, ServerResult},
+    attic::io::read_chunk_async,
+    attic::util::Finally,
+    async_trait::async_trait,
+    aws_config::{retry::RetryConfig, BehaviorVersion},
+    aws_sdk_s3::{
+        config::{Builder as S3ConfigBuilder, Credentials, Region, StalledStreamProtectionConfig},
+        operation::get_object::builders::GetObjectFluentBuilder,
+        presigning::PresigningConfig,
+        types::{CompletedMultipartUpload, CompletedPart},
+        Client,
+    },
+    bytes::BytesMut,
+    futures::future::join_all,
+    std::time::Duration,
+    tokio::io::AsyncRead,
+};
 
 /// The chunk size for each part in a multipart upload.
+#[cfg(feature = "s3")]
 const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 /// The S3 remote file storage backend.
+#[cfg(feature = "s3")]
 #[derive(Debug)]
 pub struct S3Backend {
     client: Client,
@@ -32,6 +36,7 @@ pub struct S3Backend {
 }
 
 /// S3 remote file storage configuration.
+#[cfg_attr(not(feature = "s3"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct S3StorageConfig {
     /// The AWS region.
@@ -53,6 +58,7 @@ pub struct S3StorageConfig {
 }
 
 /// S3 credential configuration.
+#[cfg_attr(not(feature = "s3"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct S3CredentialsConfig {
     /// Access key ID.
@@ -77,6 +83,7 @@ pub struct S3RemoteFile {
     pub key: String,
 }
 
+#[cfg(feature = "s3")]
 impl S3Backend {
     pub async fn new(config: S3StorageConfig) -> ServerResult<Self> {
         let stalled_stream_protection = StalledStreamProtectionConfig::enabled()
@@ -171,6 +178,7 @@ impl S3Backend {
     }
 }
 
+#[cfg(feature = "s3")]
 #[async_trait]
 impl StorageBackend for S3Backend {
     async fn upload_file(

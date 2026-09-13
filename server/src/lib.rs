@@ -51,7 +51,10 @@ use config::{Config, StorageConfig};
 use database::migration::{Migrator, MigratorTrait};
 use error::{ErrorKind, ServerError, ServerResult};
 use middleware::{init_request_state, restrict_host, set_visibility_header};
-use storage::{LocalBackend, S3Backend, StorageBackend};
+use storage::{LocalBackend, StorageBackend};
+
+#[cfg(feature = "s3")]
+use storage::S3Backend;
 
 type State = Arc<StateInner>;
 type RequestState = Arc<RequestStateInner>;
@@ -145,11 +148,17 @@ impl StateInner {
                         let boxed: Box<dyn StorageBackend> = Box::new(local);
                         Ok(Arc::new(boxed))
                     }
+                    #[cfg(feature = "s3")]
                     StorageConfig::S3(s3_config) => {
                         let s3 = S3Backend::new(s3_config.clone()).await?;
                         let boxed: Box<dyn StorageBackend> = Box::new(s3);
                         Ok(Arc::new(boxed))
                     }
+                    #[cfg(not(feature = "s3"))]
+                    StorageConfig::S3(_) => Err(ErrorKind::StorageError(anyhow::anyhow!(
+                        "this cellerd was built without S3 support (cargo feature \"s3\")"
+                    ))
+                    .into()),
                 }
             })
             .await
