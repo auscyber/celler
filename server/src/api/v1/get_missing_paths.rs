@@ -30,7 +30,6 @@ pub(crate) async fn get_missing_paths(
 ) -> ServerResult<Json<GetMissingPathsResponse>> {
     let database = state.database().await?;
     req_state
-        .auth
         .auth_cache(database, &payload.cache, |_, permission| {
             permission.require_push()?;
             Ok(())

@@ -129,6 +129,10 @@ pub struct Config {
     #[serde(default = "Default::default")]
     pub jwt: JWTConfig,
 
+    /// Tracing and telemetry.
+    #[serde(default = "Default::default")]
+    pub tracing: TracingConfig,
+
     /// (Deprecated Stub)
     ///
     /// This simply results in an error telling the user to update
@@ -299,6 +303,68 @@ pub enum CompressionType {
     /// XZ.
     #[serde(rename = "xz")]
     Xz,
+}
+
+/// Tracing and telemetry configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TracingConfig {
+    /// The `service.name` reported to the collector.
+    #[serde(rename = "service-name", default = "default_service_name")]
+    pub service_name: String,
+
+    /// OTLP span export.
+    ///
+    /// Export is off unless this table is present.
+    #[serde(default)]
+    pub otlp: Option<OtlpConfig>,
+}
+
+impl Default for TracingConfig {
+    fn default() -> Self {
+        Self {
+            service_name: default_service_name(),
+            otlp: None,
+        }
+    }
+}
+
+/// OTLP span export configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OtlpConfig {
+    /// The collector endpoint.
+    ///
+    /// If unset, the standard `OTEL_EXPORTER_OTLP_ENDPOINT` and
+    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` environment variables apply,
+    /// falling back to the default endpoint for the protocol.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+
+    /// The wire protocol to reach the collector with.
+    #[serde(default)]
+    pub protocol: OtlpProtocol,
+
+    /// The timeout of a single export.
+    #[serde(with = "humantime_serde", default = "default_otlp_timeout")]
+    pub timeout: Duration,
+
+    /// The fraction of traces to sample, from 0.0 to 1.0.
+    #[serde(rename = "sample-ratio", default = "default_otlp_sample_ratio")]
+    pub sample_ratio: f64,
+}
+
+/// The wire protocol used to reach an OTLP collector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum OtlpProtocol {
+    /// gRPC, conventionally on port 4317.
+    #[default]
+    #[serde(rename = "grpc")]
+    Grpc,
+
+    /// HTTP with binary protobuf, conventionally on port 4318.
+    #[serde(rename = "http")]
+    Http,
 }
 
 /// Garbage collection config.
@@ -562,19 +628,31 @@ fn default_default_retention_period() -> Duration {
     Duration::ZERO
 }
 
+fn default_service_name() -> String {
+    "cellerd".to_string()
+}
+
+fn default_otlp_timeout() -> Duration {
+    Duration::from_secs(10)
+}
+
+fn default_otlp_sample_ratio() -> f64 {
+    1.0
+}
+
 fn default_max_nar_info_size() -> usize {
     1024 * 1024 // 1 MiB
 }
 
 fn load_config_from_path(path: &Path) -> Result<Config> {
-    tracing::info!("Using configurations: {:?}", path);
+    eprintln!("Using configurations: {:?}", path);
 
     let config = std::fs::read_to_string(path)?;
     Ok(toml::from_str(&config)?)
 }
 
 fn load_config_from_str(s: &str) -> Result<Config> {
-    tracing::info!("Using configurations from environment variable");
+    eprintln!("Using configurations from environment variable");
     Ok(toml::from_str(s)?)
 }
 

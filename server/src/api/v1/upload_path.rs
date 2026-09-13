@@ -25,7 +25,7 @@ use tokio::io::{AsyncBufRead, AsyncReadExt};
 use tokio::sync::Semaphore;
 use tokio::task::spawn;
 use tokio_util::io::StreamReader;
-use tracing::instrument;
+use tracing::{instrument, Instrument};
 use uuid::Uuid;
 
 use crate::compression::{CompressionStream, CompressorFn};
@@ -81,7 +81,12 @@ trait UploadPathNarInfoExt {
 /// updated, it means the NAR exists in the global cache and we can deduplicate
 /// after confirming the NAR hash ("Deduplicate" case). Otherwise, we perform
 /// a new upload to the storage backend ("New NAR" case).
-#[instrument(skip_all)]
+#[instrument(skip_all, fields(
+    cache_name = tracing::field::Empty,
+    store_path_hash = tracing::field::Empty,
+    nar_size = tracing::field::Empty,
+    result = tracing::field::Empty,
+))]
 #[axum_macros::debug_handler]
 pub(crate) async fn upload_path(
     Extension(state): Extension<State>,
@@ -138,9 +143,17 @@ pub(crate) async fn upload_path(
     };
     let cache_name = &upload_info.cache;
 
+    // The handler span gets the detail; the request span gets what whole
+    // traces are sliced by.
+    let span = tracing::Span::current();
+    span.record("cache_name", cache_name.as_str());
+    span.record("store_path_hash", upload_info.store_path_hash.as_str());
+    span.record("nar_size", upload_info.nar_size);
+
+    req_state.record_store_path_hash(&upload_info.store_path_hash);
+
     let database = state.database().await?;
     let cache = req_state
-        .auth
         .auth_cache(database, cache_name, |cache, permission| {
             permission.require_push()?;
             Ok(cache)
@@ -162,6 +175,8 @@ pub(crate) async fn upload_path(
 
         if missing_chunk.is_none() {
             // Can actually be deduplicated
+            span.record("result", "deduplicated");
+
             return upload_path_dedup(
                 username,
                 cache,
@@ -176,10 +191,16 @@ pub(crate) async fn upload_path(
     }
 
     // New NAR or need to repair
+    span.record("result", "new");
     upload_path_new(username, cache, upload_info, stream, database, &state).await
 }
 
 /// Uploads a path when there is already a matching NAR in the global cache.
+#[instrument(skip_all, fields(
+    cache_name = %cache.name,
+    store_path_hash = %upload_info.store_path_hash.as_str(),
+    nar_size = upload_info.nar_size,
+))]
 async fn upload_path_dedup(
     username: Option<String>,
     cache: cache::Model,
@@ -260,6 +281,12 @@ async fn upload_path_dedup(
 /// It's okay if some other client races to upload the same NAR before
 /// us. The `nar` table can hold duplicate NARs which can be deduplicated
 /// in a background process.
+#[instrument(skip_all, fields(
+    cache_name = %cache.name,
+    store_path_hash = %upload_info.store_path_hash.as_str(),
+    nar_size = upload_info.nar_size,
+    chunked = tracing::field::Empty,
+))]
 async fn upload_path_new(
     username: Option<String>,
     cache: cache::Model,
@@ -269,15 +296,26 @@ async fn upload_path_new(
     state: &State,
 ) -> ServerResult<Json<UploadPathResult>> {
     let nar_size_threshold = state.config.chunking.nar_size_threshold;
+    let chunked = nar_size_threshold != 0 && upload_info.nar_size >= nar_size_threshold;
 
-    if nar_size_threshold == 0 || upload_info.nar_size < nar_size_threshold {
-        upload_path_new_unchunked(username, cache, upload_info, stream, database, state).await
-    } else {
+    tracing::Span::current().record("chunked", chunked);
+
+    if chunked {
         upload_path_new_chunked(username, cache, upload_info, stream, database, state).await
+    } else {
+        upload_path_new_unchunked(username, cache, upload_info, stream, database, state).await
     }
 }
 
 /// Uploads a path when there is no matching NAR in the global cache (chunked).
+#[instrument(skip_all, fields(
+    cache_name = %cache.name,
+    store_path_hash = %upload_info.store_path_hash.as_str(),
+    nar_size = upload_info.nar_size,
+    num_chunks = tracing::field::Empty,
+    file_size = tracing::field::Empty,
+    deduplicated_size = tracing::field::Empty,
+))]
 async fn upload_path_new_chunked(
     username: Option<String>,
     cache: cache::Model,
@@ -360,33 +398,38 @@ async fn upload_path_new_chunked(
             let state = state.clone();
             let require_proof_of_possession = state.config.require_proof_of_possession;
 
-            spawn(async move {
-                let chunk = upload_chunk(
-                    data,
-                    compression_type,
-                    compression_level,
-                    database.clone(),
-                    state,
-                    require_proof_of_possession,
-                )
-                .await?;
+            let chunk_span = tracing::info_span!("upload_chunk_task", chunk_idx);
 
-                // Create mapping from the NAR to the chunk
-                ChunkRef::insert(chunkref::ActiveModel {
-                    nar_id: Set(nar_id),
-                    seq: Set(chunk_idx),
-                    chunk_id: Set(Some(chunk.guard.id)),
-                    chunk_hash: Set(chunk.guard.chunk_hash.clone()),
-                    compression: Set(chunk.guard.compression.clone()),
-                    ..Default::default()
-                })
-                .exec(&database)
-                .await
-                .map_err(ServerError::database_error)?;
+            spawn(
+                async move {
+                    let chunk = upload_chunk(
+                        data,
+                        compression_type,
+                        compression_level,
+                        database.clone(),
+                        state,
+                        require_proof_of_possession,
+                    )
+                    .await?;
 
-                drop(permit);
-                Ok(chunk)
-            })
+                    // Create mapping from the NAR to the chunk
+                    ChunkRef::insert(chunkref::ActiveModel {
+                        nar_id: Set(nar_id),
+                        seq: Set(chunk_idx),
+                        chunk_id: Set(Some(chunk.guard.id)),
+                        chunk_hash: Set(chunk.guard.chunk_hash.clone()),
+                        compression: Set(chunk.guard.compression.clone()),
+                        ..Default::default()
+                    })
+                    .exec(&database)
+                    .await
+                    .map_err(ServerError::database_error)?;
+
+                    drop(permit);
+                    Ok(chunk)
+                }
+                .instrument(chunk_span),
+            )
         });
 
         chunk_idx += 1;
@@ -408,6 +451,8 @@ async fn upload_path_new_chunked(
         .map(|join_result| join_result.unwrap())
         .collect::<ServerResult<Vec<_>>>()?;
 
+    tracing::Span::current().record("num_chunks", chunks.len());
+
     let (file_size, deduplicated_size) =
         chunks
             .iter()
@@ -421,6 +466,10 @@ async fn upload_path_new_chunked(
                     },
                 )
             });
+
+    let span = tracing::Span::current();
+    span.record("file_size", file_size);
+    span.record("deduplicated_size", deduplicated_size);
 
     // Finally...
     let txn = database
@@ -469,6 +518,11 @@ async fn upload_path_new_chunked(
 /// Uploads a path when there is no matching NAR in the global cache (unchunked).
 ///
 /// We upload the entire NAR as a single chunk.
+#[instrument(skip_all, fields(
+    cache_name = %cache.name,
+    store_path_hash = %upload_info.store_path_hash.as_str(),
+    nar_size = upload_info.nar_size,
+))]
 async fn upload_path_new_unchunked(
     username: Option<String>,
     cache: cache::Model,
@@ -567,6 +621,12 @@ async fn upload_path_new_unchunked(
 /// Uploads a chunk with the desired compression.
 ///
 /// This will automatically perform deduplication if the chunk exists.
+#[instrument(skip_all, fields(
+    chunk_hash = %data.hash().to_typed_base16(),
+    chunk_size = data.size(),
+    compression = ?compression_type,
+    deduplicated = tracing::field::Empty,
+))]
 async fn upload_chunk(
     data: ChunkData,
     compression_type: CompressionType,
@@ -606,11 +666,15 @@ async fn upload_chunk(
             }
         }
 
+        tracing::Span::current().record("deduplicated", true);
+
         return Ok(UploadChunkResult {
             guard: existing_chunk,
             deduplicated: true,
         });
     }
+
+    tracing::Span::current().record("deduplicated", false);
 
     let key = format!("{}.chunk", Uuid::new_v4());
 

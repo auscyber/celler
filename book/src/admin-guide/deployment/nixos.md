@@ -79,6 +79,71 @@ You can import the module in one of two ways:
 After the new configuration is deployed, the Celler Server will be accessible on port 8080.
 It's highly recommended to place it behind a reverse proxy like [NGINX](https://nixos.wiki/wiki/Nginx) to provide HTTPS.
 
+## Tracing
+
+The server exports spans over OTLP, and returns correlation headers on every response:
+
+- `X-Celler-Op-Id`: the trace ID of the request, rendered as a UUID. It also
+  appears in error bodies, so an ID a user quotes can be pasted straight into a
+  trace search.
+- `X-Request-Id`: echoed back when the client or a proxy sent one, generated
+  otherwise.
+- `traceparent`: the W3C trace context of the response. An inbound `traceparent`
+  is never adopted — every request starts a fresh root trace.
+
+```nix
+{
+  services.cellerd = {
+    # What the server logs to the journal
+    logFilter = "info,attic_server=debug";
+
+    tracing = {
+      serviceName = "cellerd-prod";
+
+      # What gets exported, independently of logFilter
+      filter = "info";
+
+      otlp = {
+        enable = true;
+        endpoint = "http://otel-collector:4317";
+        protocol = "grpc"; # or "http", conventionally on port 4318
+        sampleRatio = 0.1;
+
+        # Non-secret headers only: these land in the Nix store
+        headers.x-scope-orgid = "celler";
+      };
+    };
+  };
+}
+```
+
+### Authenticating to the collector
+
+Anything that authenticates must not go in `settings` or `tracing.otlp.headers`,
+because the generated configuration and the unit environment both end up in the
+world-readable Nix store. Put it in an `environmentFile` instead, which systemd
+reads after the unit environment and which therefore wins:
+
+```
+OTEL_EXPORTER_OTLP_HEADERS="authorization=Basic aW5zdGFuY2U6dG9rZW4="
+```
+
+`environmentFile` also accepts a list, so an OTLP token can live in its own file
+alongside the JWT secret:
+
+```nix
+{
+  services.cellerd.environmentFile = [
+    "/run/secrets/cellerd-jwt.env"
+    "/run/secrets/cellerd-otlp.env"
+  ];
+}
+```
+
+The exporter honours the standard OTLP environment variables, so
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS` and friends
+work from the same files. Leaving `tracing.otlp.endpoint` null defers to them.
+
 ## Operations
 
 The NixOS module installs the `cellerd-celleradm` wrapper which runs the `celleradm` command as the `cellerd` user.

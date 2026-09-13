@@ -86,7 +86,6 @@ async fn get_nix_cache_info(
 ) -> ServerResult<NixCacheInfo> {
     let database = state.database().await?;
     let cache = req_state
-        .auth
         .auth_cache(database, &cache_name, |cache, permission| {
             permission.require_pull()?;
             Ok(cache)
@@ -129,6 +128,9 @@ async fn get_store_path_info(
     }
 
     let store_path_hash = StorePathHash::new(components[0].to_string())?;
+
+    req_state.record_cache_name(&cache_name);
+    req_state.record_store_path_hash(&store_path_hash);
 
     tracing::debug!(
         "Received request for {}.narinfo in {:?}",
@@ -183,6 +185,9 @@ async fn get_nar(
     }
 
     let store_path_hash = StorePathHash::new(components[0].to_string())?;
+
+    req_state.record_cache_name(&cache_name);
+    req_state.record_store_path_hash(&store_path_hash);
 
     tracing::debug!(
         "Received request for {}.nar in {:?}",

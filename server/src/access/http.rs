@@ -5,6 +5,7 @@ use attic_token::util::parse_authorization_header;
 use axum::{extract::Request, middleware::Next, response::Response};
 use sea_orm::DatabaseConnection;
 use tokio::sync::OnceCell;
+use tracing::instrument;
 
 use crate::access::{CachePermission, Token};
 use crate::database::{entity::cache::CacheModel, AtticDatabase};
@@ -34,6 +35,7 @@ impl AuthState {
     }
 
     /// Finds and performs authorization for a cache.
+    #[instrument(skip_all, fields(cache_name = %cache_name.as_str()))]
     pub async fn auth_cache<F, T>(
         &self,
         database: &DatabaseConnection,
@@ -94,30 +96,39 @@ impl AuthState {
 
 /// Performs auth.
 pub async fn apply_auth(req: Request, next: Next) -> Response {
-    let token: Option<Token> = req
-        .headers()
-        .get("Authorization")
-        .and_then(|bytes| bytes.to_str().ok())
-        .and_then(parse_authorization_header)
-        .and_then(|jwt| {
-            let state = req.extensions().get::<State>().unwrap();
-            let signature_type = state.config.jwt.signing_config.clone().into();
+    // The span the correlation identifiers live on, so that the authenticated
+    // user becomes another dimension traces can be sliced by.
+    let request_span = tracing::Span::current();
 
-            let res_token = Token::from_jwt(
-                &jwt,
-                &signature_type,
-                &state.config.jwt.token_bound_issuer,
-                &state.config.jwt.token_bound_audiences,
-            );
+    let token: Option<Token> = tracing::info_span!("authenticate").in_scope(|| {
+        req.headers()
+            .get("Authorization")
+            .and_then(|bytes| bytes.to_str().ok())
+            .and_then(parse_authorization_header)
+            .and_then(|jwt| {
+                let state = req.extensions().get::<State>().unwrap();
+                let signature_type = state.config.jwt.signing_config.clone().into();
 
-            if let Err(e) = &res_token {
-                tracing::debug!("Ignoring bad JWT token: {}", e);
-            }
+                let res_token = Token::from_jwt(
+                    &jwt,
+                    &signature_type,
+                    &state.config.jwt.token_bound_issuer,
+                    &state.config.jwt.token_bound_audiences,
+                );
 
-            res_token.ok()
-        });
+                if let Err(e) = &res_token {
+                    tracing::debug!("Ignoring bad JWT token: {}", e);
+                }
+
+                res_token.ok()
+            })
+    });
 
     if let Some(token) = token {
+        if let Some(sub) = token.sub() {
+            request_span.record("enduser.id", sub);
+        }
+
         let req_state = req.extensions().get::<RequestState>().unwrap();
         req_state.auth.token.set(token).unwrap();
         tracing::trace!("Added valid token");

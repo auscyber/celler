@@ -8,9 +8,11 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use tracing::Instrument;
 
 use super::{AuthState, RequestState, RequestStateInner, State};
 use crate::error::{ErrorKind, ServerResult};
+use crate::telemetry;
 use attic::api::binary_cache::CELLER_CACHE_VISIBILITY;
 
 fn extract_host(req: &Request) -> Option<String> {
@@ -18,6 +20,40 @@ fn extract_host(req: &Request) -> Option<String> {
         .get("host")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned())
+}
+
+/// Attaches the correlation identifiers to the request span and the response.
+///
+/// Runs inside the request span created by [`telemetry::MakeRequestSpan`], so
+/// the op ID it derives is the OpenTelemetry trace ID of that span whenever
+/// export is on.
+pub(crate) async fn correlate_request(req: Request, next: Next) -> Response {
+    let span = telemetry::request_span(&req);
+
+    correlate_inner(req, next).instrument(span).await
+}
+
+async fn correlate_inner(mut req: Request, next: Next) -> Response {
+    let span = tracing::Span::current();
+    let correlation = telemetry::correlate(&span, req.headers());
+    let op_id = correlation.op_id;
+
+    req.extensions_mut().insert(correlation.clone());
+
+    let mut response = op_id.scope(next.run(req)).await;
+
+    let status = response.status();
+    span.record("http.response.status_code", status.as_u16());
+
+    // Only server-side faults mark the trace as failed; a 404 or a 401 is a
+    // normal outcome of serving a request.
+    if status.is_server_error() {
+        span.record("otel.status_code", "ERROR");
+    }
+
+    telemetry::write_headers(&span, &correlation, response.headers_mut());
+
+    response
 }
 
 /// Initializes per-request state.
@@ -43,6 +79,7 @@ pub async fn init_request_state(
         host,
         client_claims_https,
         public_cache: AtomicBool::new(false),
+        span: tracing::Span::current(),
     });
 
     req.extensions_mut().insert(req_state);

@@ -1,30 +1,35 @@
 //! S3 remote files.
 
-use std::time::Duration;
-
-use async_trait::async_trait;
-use aws_config::{retry::RetryConfig, BehaviorVersion};
-use aws_sdk_s3::{
-    config::{Builder as S3ConfigBuilder, Credentials, Region, StalledStreamProtectionConfig},
-    operation::get_object::builders::GetObjectFluentBuilder,
-    presigning::PresigningConfig,
-    types::{CompletedMultipartUpload, CompletedPart},
-    Client,
-};
-use bytes::BytesMut;
-use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncRead;
 
-use super::{Download, RemoteFile, StorageBackend};
-use crate::error::{ErrorKind, ServerError, ServerResult};
-use attic::io::read_chunk_async;
-use attic::util::Finally;
+#[cfg(feature = "s3")]
+use {
+    super::{Download, RemoteFile, StorageBackend},
+    crate::error::{ErrorKind, ServerError, ServerResult},
+    async_trait::async_trait,
+    attic::io::read_chunk_async,
+    attic::util::Finally,
+    aws_config::{retry::RetryConfig, BehaviorVersion},
+    aws_sdk_s3::{
+        config::{Builder as S3ConfigBuilder, Credentials, Region, StalledStreamProtectionConfig},
+        operation::get_object::builders::GetObjectFluentBuilder,
+        presigning::PresigningConfig,
+        types::{CompletedMultipartUpload, CompletedPart},
+        Client,
+    },
+    bytes::BytesMut,
+    futures::future::join_all,
+    std::time::Duration,
+    tokio::io::AsyncRead,
+    tracing::{instrument, Instrument},
+};
 
 /// The chunk size for each part in a multipart upload.
+#[cfg(feature = "s3")]
 const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 /// The S3 remote file storage backend.
+#[cfg(feature = "s3")]
 #[derive(Debug)]
 pub struct S3Backend {
     client: Client,
@@ -32,6 +37,7 @@ pub struct S3Backend {
 }
 
 /// S3 remote file storage configuration.
+#[cfg_attr(not(feature = "s3"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct S3StorageConfig {
     /// The AWS region.
@@ -53,6 +59,7 @@ pub struct S3StorageConfig {
 }
 
 /// S3 credential configuration.
+#[cfg_attr(not(feature = "s3"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct S3CredentialsConfig {
     /// Access key ID.
@@ -77,7 +84,9 @@ pub struct S3RemoteFile {
     pub key: String,
 }
 
+#[cfg(feature = "s3")]
 impl S3Backend {
+    #[instrument(skip_all, fields(region = %config.region, bucket = %config.bucket))]
     pub async fn new(config: S3StorageConfig) -> ServerResult<Self> {
         let stalled_stream_protection = StalledStreamProtectionConfig::enabled()
             .grace_period(Duration::from_secs(60))
@@ -147,6 +156,7 @@ impl S3Backend {
         Ok((client, file))
     }
 
+    #[instrument(skip_all, fields(prefer_stream))]
     async fn get_download(
         &self,
         req: GetObjectFluentBuilder,
@@ -171,19 +181,30 @@ impl S3Backend {
     }
 }
 
+#[cfg(feature = "s3")]
 #[async_trait]
 impl StorageBackend for S3Backend {
+    #[instrument(skip_all, fields(
+        otel.kind = "client",
+        key = %name,
+        bucket = %self.config.bucket,
+        multipart = tracing::field::Empty,
+        parts = tracing::field::Empty,
+    ))]
     async fn upload_file(
         &self,
         name: String,
         mut stream: &mut (dyn AsyncRead + Unpin + Send),
     ) -> ServerResult<RemoteFile> {
+        let span = tracing::Span::current();
         let buf = BytesMut::with_capacity(CHUNK_SIZE);
         let first_chunk = read_chunk_async(&mut stream, buf)
             .await
             .map_err(ServerError::storage_error)?;
 
         if first_chunk.len() < CHUNK_SIZE {
+            span.record("multipart", false);
+
             // do a normal PutObject
             let put_object = self
                 .client
@@ -203,6 +224,8 @@ impl StorageBackend for S3Backend {
                 key: name,
             }));
         }
+
+        span.record("multipart", true);
 
         let multipart = self
             .client
@@ -257,7 +280,15 @@ impl StorageBackend for S3Backend {
             }
 
             let client = self.client.clone();
-            let fut = tokio::task::spawn({
+            let part_span = tracing::info_span!(
+                "s3_upload_part",
+                otel.kind = "client",
+                part_number,
+                size = chunk.len(),
+            );
+
+            // Spans do not cross `spawn`, so attach it explicitly.
+            let fut = tokio::task::spawn(
                 client
                     .upload_part()
                     .bucket(&self.config.bucket)
@@ -266,7 +297,8 @@ impl StorageBackend for S3Backend {
                     .part_number(part_number)
                     .body(chunk.clone().into())
                     .send()
-            });
+                    .instrument(part_span),
+            );
 
             parts.push(fut);
             part_number += 1;
@@ -289,6 +321,8 @@ impl StorageBackend for S3Backend {
                     .build()
             })
             .collect::<Vec<_>>();
+
+        span.record("parts", completed_parts.len());
 
         let completed_multipart_upload = CompletedMultipartUpload::builder()
             .set_parts(Some(completed_parts))
@@ -316,6 +350,7 @@ impl StorageBackend for S3Backend {
         }))
     }
 
+    #[instrument(skip_all, fields(otel.kind = "client", key = %name, bucket = %self.config.bucket))]
     async fn delete_file(&self, name: String) -> ServerResult<()> {
         let deletion = self
             .client
@@ -331,6 +366,7 @@ impl StorageBackend for S3Backend {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(otel.kind = "client", remote_file = %file.remote_file_id()))]
     async fn delete_file_db(&self, file: &RemoteFile) -> ServerResult<()> {
         let (client, file) = self.get_client_from_db_ref(file).await?;
 
@@ -347,6 +383,7 @@ impl StorageBackend for S3Backend {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(otel.kind = "client", key = %name, bucket = %self.config.bucket))]
     async fn download_file(&self, name: String, prefer_stream: bool) -> ServerResult<Download> {
         let req = self
             .client
@@ -357,6 +394,7 @@ impl StorageBackend for S3Backend {
         self.get_download(req, prefer_stream).await
     }
 
+    #[instrument(skip_all, fields(otel.kind = "client", remote_file = %file.remote_file_id()))]
     async fn download_file_db(
         &self,
         file: &RemoteFile,

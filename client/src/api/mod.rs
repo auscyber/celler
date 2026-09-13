@@ -22,6 +22,7 @@ use attic::api::v1::get_missing_paths::{GetMissingPathsRequest, GetMissingPathsR
 use attic::api::v1::upload_path::{
     UploadPathNarInfo, UploadPathResult, CELLER_NAR_INFO, CELLER_NAR_INFO_PREAMBLE_SIZE,
 };
+use attic::api::CELLER_OP_ID;
 use attic::cache::CacheName;
 use attic::nix_store::StorePathHash;
 
@@ -58,6 +59,10 @@ pub struct StructuredApiError {
     code: u16,
     error: String,
     message: String,
+
+    /// The server-assigned op ID, to quote when reporting the failure.
+    #[serde(default)]
+    op_id: Option<String>,
 }
 
 impl ApiClient {
@@ -218,9 +223,18 @@ impl StdError for ApiError {}
 impl ApiError {
     async fn try_from_response(response: Response) -> Result<Self> {
         let status = response.status();
+        let header_op_id = response
+            .headers()
+            .get(CELLER_OP_ID)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
         let text = response.text().await?;
-        match serde_json::from_str(&text) {
-            Ok(s) => Ok(Self::Structured(s)),
+        match serde_json::from_str::<StructuredApiError>(&text) {
+            Ok(mut s) => {
+                s.op_id = s.op_id.or(header_op_id);
+                Ok(Self::Structured(s))
+            }
             Err(_) => Ok(Self::Unstructured(status, text)),
         }
     }
@@ -228,14 +242,23 @@ impl ApiError {
 
 impl fmt::Display for StructuredApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.error, self.message)
+        write!(f, "{}: {}", self.error, self.message)?;
+
+        if let Some(op_id) = &self.op_id {
+            write!(f, " (op ID {})", op_id)?;
+        }
+
+        Ok(())
     }
 }
 
 fn build_http_client(token: Option<&str>) -> HttpClient {
     let mut headers = HeaderMap::new();
 
-    headers.insert(USER_AGENT, HeaderValue::from_str(CELLER_USER_AGENT).unwrap());
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_str(CELLER_USER_AGENT).unwrap(),
+    );
 
     if let Some(token) = token {
         let auth_header = HeaderValue::from_str(&format!("bearer {}", token)).unwrap();

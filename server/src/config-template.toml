@@ -164,3 +164,30 @@ token-rs256-secret-base64 = "%token_rs256_secret_base64%"
 # You can also set it via the `CELLER_SERVER_TOKEN_HS256_SECRET_BASE64`
 # environment variable.
 #token-hs256-secret-base64 = ""
+
+# Tracing and telemetry
+#[tracing]
+# The `service.name` reported to the collector
+#service-name = "cellerd"
+
+# OTLP span export
+#
+# Export is off unless this table is present. Every request is a fresh
+# root trace; an inbound `traceparent` is never adopted.
+#[tracing.otlp]
+# The collector endpoint
+#
+# If unset, the standard `OTEL_EXPORTER_OTLP_ENDPOINT` and
+# `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` environment variables apply.
+#endpoint = "http://localhost:4317"
+
+# The wire protocol to reach the collector with
+#
+# Can be "grpc" (port 4317) or "http" (port 4318).
+#protocol = "grpc"
+
+# The timeout of a single export
+#timeout = "10s"
+
+# The fraction of traces to sample, from 0.0 to 1.0
+#sample-ratio = 1.0

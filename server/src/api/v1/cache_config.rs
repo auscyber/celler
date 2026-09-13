@@ -26,7 +26,6 @@ pub(crate) async fn get_cache_config(
 ) -> ServerResult<Json<CacheConfig>> {
     let database = state.database().await?;
     let cache = req_state
-        .auth
         .auth_cache(database, &cache_name, |cache, permission| {
             permission.require_pull()?;
             Ok(cache)
@@ -63,7 +62,6 @@ pub(crate) async fn configure_cache(
 ) -> ServerResult<()> {
     let database = state.database().await?;
     let (cache, permission) = req_state
-        .auth
         .auth_cache(database, &cache_name, |cache, permission| {
             permission.require_configure_cache()?;
             Ok((cache, permission.clone()))
@@ -144,7 +142,6 @@ pub(crate) async fn destroy_cache(
 ) -> ServerResult<()> {
     let database = state.database().await?;
     let cache = req_state
-        .auth
         .auth_cache(database, &cache_name, |cache, permission| {
             permission.require_destroy_cache()?;
             Ok(cache)
@@ -192,6 +189,8 @@ pub(crate) async fn create_cache(
     Path(cache_name): Path<CacheName>,
     Json(payload): Json<CreateCacheRequest>,
 ) -> ServerResult<()> {
+    req_state.record_cache_name(&cache_name);
+
     let permission = req_state.auth.get_permission_for_cache(&cache_name, false);
     permission.require_create_cache()?;
 

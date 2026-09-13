@@ -13,6 +13,8 @@ use tracing_error::SpanTrace;
 
 use attic::error::AtticError;
 
+use crate::telemetry::OpId;
+
 pub type ServerResult<T> = Result<T, ServerError>;
 
 /// A server error.
@@ -81,6 +83,10 @@ pub struct ErrorResponse {
     code: u16,
     error: String,
     message: String,
+
+    /// The op ID of the request, for the user to quote when reporting it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    op_id: Option<String>,
 }
 
 impl ServerError {
@@ -179,6 +185,7 @@ impl IntoResponse for ServerError {
             code: status_code.as_u16(),
             message: sanitized.to_string(),
             error: sanitized.name().to_string(),
+            op_id: OpId::current().map(|id| id.to_string()),
         };
 
         (status_code, Json(error_response)).into_response()

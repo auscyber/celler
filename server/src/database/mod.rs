@@ -12,6 +12,7 @@ use sea_orm::query::{JoinType, QueryOrder, QuerySelect, QueryTrait};
 use sea_orm::sea_query::{Expr, ExprTrait, LockBehavior, LockType, Query, Value};
 use sea_orm::{ActiveValue::Set, ConnectionTrait, DatabaseConnection, FromQueryResult};
 use tokio::task;
+use tracing::instrument;
 
 use crate::error::{ErrorKind, ServerError, ServerResult};
 use crate::narinfo::Compression;
@@ -135,6 +136,13 @@ pub fn build_cache_object_nar_query(include_chunks: bool) -> Select<Object> {
 
 #[async_trait]
 impl AtticDatabase for DatabaseConnection {
+    #[instrument(skip_all, fields(
+        otel.kind = "client",
+        db.system.name = "sea_orm",
+        cache_name = %cache.as_str(),
+        store_path_hash = %store_path_hash.as_str(),
+        include_chunks,
+    ))]
     async fn find_object_and_chunks_by_store_path_hash(
         &self,
         cache: &CacheName,
@@ -223,6 +231,11 @@ impl AtticDatabase for DatabaseConnection {
         Ok((object, cache, nar, chunks))
     }
 
+    #[instrument(skip_all, fields(
+        otel.kind = "client",
+        db.system.name = "sea_orm",
+        cache_name = %cache.as_str(),
+    ))]
     async fn find_cache(&self, cache: &CacheName) -> ServerResult<CacheModel> {
         Cache::find()
             .filter(cache::Column::Name.eq(cache.as_str()))
@@ -233,6 +246,12 @@ impl AtticDatabase for DatabaseConnection {
             .ok_or_else(|| ErrorKind::NoSuchCache.into())
     }
 
+    #[instrument(skip_all, fields(
+        otel.kind = "client",
+        db.system.name = "sea_orm",
+        nar_hash = %nar_hash.to_typed_base16(),
+        hit = tracing::field::Empty,
+    ))]
     async fn find_and_lock_nar(&self, nar_hash: &Hash) -> ServerResult<Option<NarGuard>> {
         let one = Value::Unsigned(Some(1));
         let matched_ids = Query::select()
@@ -263,10 +282,19 @@ impl AtticDatabase for DatabaseConnection {
                 nar,
             });
 
+        tracing::Span::current().record("hit", guard.is_some());
+
         Ok(guard)
     }
 
     // FIXME: Repetition
+    #[instrument(skip_all, fields(
+        otel.kind = "client",
+        db.system.name = "sea_orm",
+        chunk_hash = %chunk_hash.to_typed_base16(),
+        compression = %compression.as_str(),
+        hit = tracing::field::Empty,
+    ))]
     async fn find_and_lock_chunk(
         &self,
         chunk_hash: &Hash,
@@ -302,9 +330,16 @@ impl AtticDatabase for DatabaseConnection {
                 chunk,
             });
 
+        tracing::Span::current().record("hit", guard.is_some());
+
         Ok(guard)
     }
 
+    #[instrument(skip_all, fields(
+        otel.kind = "client",
+        db.system.name = "sea_orm",
+        object_id,
+    ))]
     async fn bump_object_last_accessed(&self, object_id: i64) -> ServerResult<()> {
         let now = Utc::now();
 

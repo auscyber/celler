@@ -25,6 +25,7 @@ mod narinfo;
 pub mod nix_manifest;
 pub mod oobe;
 mod storage;
+pub mod telemetry;
 
 use std::future::IntoFuture;
 use std::net::SocketAddr;
@@ -44,14 +45,21 @@ use tokio::sync::OnceCell;
 use tokio::time;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
+use tracing::Span;
 
 use access::http::{apply_auth, AuthState};
+use access::CachePermission;
 use attic::cache::CacheName;
+use attic::nix_store::StorePathHash;
 use config::{Config, StorageConfig};
+use database::entity::cache::CacheModel;
 use database::migration::{Migrator, MigratorTrait};
 use error::{ErrorKind, ServerError, ServerResult};
-use middleware::{init_request_state, restrict_host, set_visibility_header};
-use storage::{LocalBackend, S3Backend, StorageBackend};
+use middleware::{correlate_request, init_request_state, restrict_host, set_visibility_header};
+use storage::{LocalBackend, StorageBackend};
+
+#[cfg(feature = "s3")]
+use storage::S3Backend;
 
 type State = Arc<StateInner>;
 type RequestState = Arc<RequestStateInner>;
@@ -92,6 +100,12 @@ struct RequestStateInner {
     /// This is purely informational and used to add the `X-Celler-Cache-Visibility`.
     /// header in responses.
     public_cache: AtomicBool,
+
+    /// The root span of the request.
+    ///
+    /// Attributes worth slicing whole traces by live here rather than on an
+    /// individual handler's span.
+    span: Span,
 }
 
 impl StateInner {
@@ -145,11 +159,17 @@ impl StateInner {
                         let boxed: Box<dyn StorageBackend> = Box::new(local);
                         Ok(Arc::new(boxed))
                     }
+                    #[cfg(feature = "s3")]
                     StorageConfig::S3(s3_config) => {
                         let s3 = S3Backend::new(s3_config.clone()).await?;
                         let boxed: Box<dyn StorageBackend> = Box::new(s3);
                         Ok(Arc::new(boxed))
                     }
+                    #[cfg(not(feature = "s3"))]
+                    StorageConfig::S3(_) => Err(ErrorKind::StorageError(anyhow::anyhow!(
+                        "this cellerd was built without S3 support (cargo feature \"s3\")"
+                    ))
+                    .into()),
                 }
             })
             .await
@@ -208,6 +228,34 @@ impl RequestStateInner {
     fn set_public_cache(&self, public: bool) {
         self.public_cache.store(public, Ordering::Relaxed);
     }
+
+    /// Finds and performs authorization for a cache.
+    ///
+    /// Wraps [`AuthState::auth_cache`] so that every cache-scoped request
+    /// records which cache it touched.
+    async fn auth_cache<F, T>(
+        &self,
+        database: &DatabaseConnection,
+        cache_name: &CacheName,
+        f: F,
+    ) -> ServerResult<T>
+    where
+        F: FnOnce(CacheModel, &mut CachePermission) -> ServerResult<T>,
+    {
+        self.record_cache_name(cache_name);
+        self.auth.auth_cache(database, cache_name, f).await
+    }
+
+    /// Records the cache being operated on for the whole trace.
+    fn record_cache_name(&self, cache_name: &CacheName) {
+        self.span.record("cache_name", cache_name.as_str());
+    }
+
+    /// Records the store path being operated on for the whole trace.
+    fn record_store_path_hash(&self, store_path_hash: &StorePathHash) {
+        self.span
+            .record("store_path_hash", store_path_hash.as_str());
+    }
 }
 
 /// The fallback route.
@@ -238,6 +286,7 @@ pub async fn run_api_server(cli_listen: Option<SocketAddr>, config: Config) -> R
         .layer(axum::middleware::from_fn(restrict_host))
         .layer(Extension(state.clone()))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(correlate_request))
         .layer(CatchPanicLayer::new());
 
     eprintln!("Listening on {:?}...", listen);

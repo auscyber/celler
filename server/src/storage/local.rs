@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{self, File};
 use tokio::io::{self, AsyncRead};
+use tracing::instrument;
 
 use super::{Download, RemoteFile, StorageBackend};
 use crate::error::{ErrorKind, ServerError, ServerResult};
@@ -127,6 +128,7 @@ impl LocalBackend {
 
 #[async_trait]
 impl StorageBackend for LocalBackend {
+    #[instrument(skip_all, fields(name = %name, bytes = tracing::field::Empty))]
     async fn upload_file(
         &self,
         name: String,
@@ -150,13 +152,16 @@ impl StorageBackend for LocalBackend {
             ))
         })?;
 
-        io::copy(&mut stream, &mut file)
+        let bytes = io::copy(&mut stream, &mut file)
             .await
             .map_err(ServerError::storage_error)?;
+
+        tracing::Span::current().record("bytes", bytes);
 
         Ok(RemoteFile::Local(LocalRemoteFile { name }))
     }
 
+    #[instrument(skip_all, fields(name = %name))]
     async fn delete_file(&self, name: String) -> ServerResult<()> {
         fs::remove_file(self.get_path(&name))
             .await
@@ -165,6 +170,7 @@ impl StorageBackend for LocalBackend {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(remote_file = %file.remote_file_id()))]
     async fn delete_file_db(&self, file: &RemoteFile) -> ServerResult<()> {
         let file = if let RemoteFile::Local(file) = file {
             file
@@ -182,6 +188,7 @@ impl StorageBackend for LocalBackend {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(name = %name))]
     async fn download_file(&self, name: String, _prefer_stream: bool) -> ServerResult<Download> {
         let file = File::open(self.get_path(&name))
             .await
@@ -190,6 +197,7 @@ impl StorageBackend for LocalBackend {
         Ok(Download::AsyncRead(Box::new(file)))
     }
 
+    #[instrument(skip_all, fields(remote_file = %file.remote_file_id()))]
     async fn download_file_db(
         &self,
         file: &RemoteFile,

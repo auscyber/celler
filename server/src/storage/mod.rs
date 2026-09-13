@@ -9,7 +9,10 @@ use tokio::io::AsyncRead;
 use crate::error::ServerResult;
 
 pub(crate) use self::local::{LocalBackend, LocalRemoteFile, LocalStorageConfig};
-pub(crate) use self::s3::{S3Backend, S3RemoteFile, S3StorageConfig};
+pub(crate) use self::s3::{S3RemoteFile, S3StorageConfig};
+
+#[cfg(feature = "s3")]
+pub(crate) use self::s3::S3Backend;
 
 /// Reference to a location where a NAR is stored.
 ///
@@ -34,6 +37,7 @@ pub enum RemoteFile {
 /// Way to download a file.
 pub enum Download {
     /// A possibly ephemeral URL.
+    #[cfg_attr(not(feature = "s3"), allow(dead_code))]
     Url(String),
 
     /// An AsyncRead.

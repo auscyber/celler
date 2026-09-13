@@ -11,6 +11,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 use attic_server::config;
+use attic_server::telemetry::{self, OtelLayer};
 
 /// Nix binary cache server.
 #[derive(Debug, Parser)]
@@ -63,11 +64,26 @@ enum ServerMode {
 async fn main() -> Result<()> {
     let opts = Opts::parse();
 
-    init_logging(opts.tokio_console);
     dump_version();
 
+    // The config decides whether spans are exported, and a per-layer filter can
+    // only be registered while the subscriber is being built, so the config has
+    // to be read first.
     let config =
         config::load_config(opts.config.as_deref(), opts.mode == ServerMode::Monolithic).await?;
+
+    // `check-config` runs inside the Nix build sandbox, where opening an
+    // exporter has nothing to talk to.
+    let tracing_config = if opts.mode == ServerMode::CheckConfig {
+        Default::default()
+    } else {
+        config.tracing.clone()
+    };
+
+    // Held until the end of `main` so the batch processor gets flushed.
+    let (otel_layer, _telemetry) = telemetry::init(&tracing_config)?;
+
+    init_logging(opts.tokio_console, otel_layer);
 
     match opts.mode {
         ServerMode::Monolithic => {
@@ -100,7 +116,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_logging(tokio_console: bool) {
+fn init_logging(tokio_console: bool, otel_layer: OtelLayer) {
     let env_filter = EnvFilter::from_default_env();
     let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
 
@@ -115,6 +131,7 @@ fn init_logging(tokio_console: bool) {
     };
 
     tracing_subscriber::registry()
+        .with(otel_layer)
         .with(fmt_layer)
         .with(error_layer)
         .with(console_layer)
