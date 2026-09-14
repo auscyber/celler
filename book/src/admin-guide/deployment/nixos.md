@@ -90,13 +90,25 @@ The server exports spans over OTLP, and returns correlation headers on every res
   otherwise.
 - `traceparent`: the W3C trace context of the response.
 
-An inbound `traceparent` is adopted by default, so a trace started by a reverse
-proxy or another service continues into the server rather than being cut in two.
-The header is untrusted input, though: anyone who can reach the server directly
-can pick the trace ID it reports and force it to be sampled. If clients reach the
-server without passing through a proxy you control, set
-`settings.tracing.accept-trace-context = false` to make every request a fresh
-root trace instead.
+An inbound `traceparent` is adopted, so a trace started by a reverse proxy or
+another service continues into the server rather than being cut in two. Note
+that the header is untrusted input: anyone who can reach the server directly can
+pick the trace ID it reports and force it to be sampled.
+
+Each request produces two spans: `HTTP request`, named after the matched route
+(`GET /{cache}/{path}`) and carrying the HTTP semantic conventions, and a
+`celler_request` child carrying `op_id`, `request_id`, `cache_name`,
+`store_path_hash` and `enduser.id`. The first comes from
+[axum-tracing-opentelemetry](https://docs.rs/axum-tracing-opentelemetry) and
+logs under the `otel::tracing` target, so include that in `RUST_LOG` to see it
+in the journal:
+
+```nix
+{
+  systemd.services.cellerd.environment.RUST_LOG =
+    "info,attic_server=debug,otel::tracing=info";
+}
+```
 
 `settings` is passed through to the server configuration verbatim, so the
 `[tracing]` section is configured there like any other:
@@ -105,9 +117,6 @@ root trace instead.
 {
   services.cellerd.settings.tracing = {
     service-name = "cellerd-prod";
-
-    # Continue a trace nginx (or anything upstream) started
-    accept-trace-context = true;
 
     otlp = {
       enabled = true;
@@ -127,7 +136,7 @@ are set like any other unit environment variable:
 {
   systemd.services.cellerd.environment = {
     # What the server logs to the journal
-    RUST_LOG = "info,attic_server=debug";
+    RUST_LOG = "info,attic_server=debug,otel::tracing=info";
 
     # What gets exported, independently of RUST_LOG. Be careful raising this to
     # `trace`: the exporter's own HTTP client is instrumented, so exporting its

@@ -2,13 +2,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use tracing::Instrument;
 use axum::{
     extract::{Extension, Request},
     http::HeaderValue,
     middleware::Next,
     response::Response,
 };
+use tracing::Instrument;
 
 use super::{AuthState, RequestState, RequestStateInner, State};
 use crate::error::{ErrorKind, ServerResult};

@@ -166,20 +166,13 @@ token-rs256-secret-base64 = "%token_rs256_secret_base64%"
 #token-hs256-secret-base64 = ""
 
 # Tracing and telemetry
+#
+# A trace started by a caller (a reverse proxy, CI, another service) is
+# continued rather than cut in two: a valid inbound `traceparent` becomes
+# the parent of the request span.
 #[tracing]
 # The `service.name` reported to the collector
 #service-name = "cellerd"
-
-# Whether to continue a trace the caller started
-#
-# When enabled, a valid inbound `traceparent` becomes the parent of the
-# request span, so a trace spans the caller (a reverse proxy, CI, another
-# service) and this server.
-#
-# The header is untrusted input: anyone who can reach the server directly
-# can choose the trace ID it reports and force it to be sampled. Turn this
-# off to make every request a fresh root trace.
-#accept-trace-context = true
 
 # OTLP span export
 #[tracing.otlp]

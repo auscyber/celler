@@ -39,11 +39,11 @@ use axum::{
     http::{uri::Scheme, Uri},
     Router,
 };
+use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 use tokio::time;
-use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
