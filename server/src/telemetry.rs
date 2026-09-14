@@ -2,12 +2,10 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use axum::http::{HeaderMap, HeaderValue};
 use opentelemetry::global;
-use opentelemetry::propagation::{Extractor, Injector};
 use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
@@ -133,67 +131,28 @@ impl fmt::Display for RequestId {
 pub struct Correlation {
     pub op_id: OpId,
     pub request_id: RequestId,
+
+    /// The span the identifiers were recorded on.
+    ///
+    /// Carried explicitly rather than reached for through `Span::current()`,
+    /// which lands on whichever middleware span happens to be innermost.
+    pub span: Span,
 }
 
-/// Whether a caller's `traceparent` may become the parent of a request span.
+/// Opens the span carrying the dimensions this server wants traces sliced by.
 ///
-/// Process-wide, like the propagator itself: the middleware that needs it runs
-/// outside the layer carrying the server state.
-static ACCEPT_TRACE_CONTEXT: AtomicBool = AtomicBool::new(false);
-
-/// Makes the request span continue the trace the caller started, if there is a
-/// valid one and we are configured to trust it.
-///
-/// Must run before the span is entered: once it has been built its parent can
-/// no longer be changed.
-pub(crate) fn adopt_trace_context(span: &Span, headers: &HeaderMap) {
-    if !ACCEPT_TRACE_CONTEXT.load(Ordering::Relaxed) {
-        return;
-    }
-
-    let parent =
-        global::get_text_map_propagator(|propagator| propagator.extract(&HeaderExtractor(headers)));
-
-    if parent.span().span_context().is_valid() {
-        let _ = span.set_parent(parent);
-    }
-}
-
-struct HeaderExtractor<'a>(&'a HeaderMap);
-
-impl Extractor for HeaderExtractor<'_> {
-    fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).and_then(|value| value.to_str().ok())
-    }
-
-    fn keys(&self) -> Vec<&str> {
-        self.0.keys().map(|name| name.as_str()).collect()
-    }
-}
-
-/// Builds the per-request span that carries the correlation fields.
-pub(crate) fn request_span<B>(request: &axum::http::Request<B>) -> Span {
-    let method = request.method();
-    let path = request.uri().path();
-
+/// A child of the span `OtelAxumLayer` opens: that one has a fixed set of
+/// fields covering the HTTP semantic conventions, and these are ours. Being
+/// real tracing fields rather than OpenTelemetry attributes, they show up in
+/// journal lines as well as on the exported span.
+pub(crate) fn correlation_span() -> Span {
     tracing::info_span!(
-        "http_request",
-        otel.name = %format_args!("{} {}", method, path),
-        otel.kind = "server",
-        http.request.method = %method,
-        url.path = %path,
-        user_agent.original = request
-            .headers()
-            .get(axum::http::header::USER_AGENT)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default(),
-        http.response.status_code = tracing::field::Empty,
-        request_id = tracing::field::Empty,
+        "celler_request",
         op_id = tracing::field::Empty,
+        request_id = tracing::field::Empty,
         enduser.id = tracing::field::Empty,
         cache_name = tracing::field::Empty,
         store_path_hash = tracing::field::Empty,
-        otel.status_code = tracing::field::Empty,
     )
 }
 
@@ -202,36 +161,22 @@ pub(crate) fn correlate(span: &Span, headers: &HeaderMap) -> Correlation {
     let request_id = RequestId::from_headers(headers).unwrap_or_else(RequestId::generate);
     let op_id = OpId::from_span(span);
 
-    span.record("request_id", request_id.as_str());
     span.record("op_id", tracing::field::display(op_id));
+    span.record("request_id", request_id.as_str());
 
-    Correlation { op_id, request_id }
+    Correlation {
+        op_id,
+        request_id,
+        span: span.clone(),
+    }
 }
 
 /// Writes the correlation headers onto a response.
-pub(crate) fn write_headers(span: &Span, correlation: &Correlation, headers: &mut HeaderMap) {
+///
+/// `traceparent` is not among them: `OtelInResponseLayer` injects it.
+pub(crate) fn write_headers(correlation: &Correlation, headers: &mut HeaderMap) {
     headers.insert(CELLER_OP_ID, correlation.op_id.header_value());
     headers.insert(REQUEST_ID, correlation.request_id.0.clone());
-
-    // No-op unless a propagator was installed, which only happens when OTLP
-    // export is on and the span context is therefore real.
-    let context = span.context();
-    global::get_text_map_propagator(|propagator| {
-        propagator.inject_context(&context, &mut HeaderInjector(headers))
-    });
-}
-
-struct HeaderInjector<'a>(&'a mut HeaderMap);
-
-impl Injector for HeaderInjector<'_> {
-    fn set(&mut self, key: &str, value: String) {
-        if let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(key.as_bytes()),
-            HeaderValue::from_str(&value),
-        ) {
-            self.0.insert(name, value);
-        }
-    }
 }
 
 /// A live OpenTelemetry pipeline.
@@ -255,8 +200,6 @@ impl Drop for TelemetryGuard {
 /// built: a per-layer filter is assigned its filter ID when the subscriber is
 /// built, so a layer added afterwards has none and panics on first use.
 pub fn init(config: &TracingConfig) -> Result<(OtelLayer, TelemetryGuard)> {
-    ACCEPT_TRACE_CONTEXT.store(config.accept_trace_context, Ordering::Relaxed);
-
     let otlp = &config.otlp;
 
     if !otlp.enabled {

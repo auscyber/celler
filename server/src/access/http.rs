@@ -96,10 +96,6 @@ impl AuthState {
 
 /// Performs auth.
 pub async fn apply_auth(req: Request, next: Next) -> Response {
-    // The span the correlation identifiers live on, so that the authenticated
-    // user becomes another dimension traces can be sliced by.
-    let request_span = tracing::Span::current();
-
     let token: Option<Token> = tracing::info_span!("authenticate").in_scope(|| {
         req.headers()
             .get("Authorization")
@@ -125,11 +121,13 @@ pub async fn apply_auth(req: Request, next: Next) -> Response {
     });
 
     if let Some(token) = token {
+        let req_state = req.extensions().get::<RequestState>().unwrap();
+
+        // So the authenticated user is another dimension traces can be sliced by.
         if let Some(sub) = token.sub() {
-            request_span.record("enduser.id", sub);
+            req_state.record_user(sub);
         }
 
-        let req_state = req.extensions().get::<RequestState>().unwrap();
         req_state.auth.token.set(token).unwrap();
         tracing::trace!("Added valid token");
     }

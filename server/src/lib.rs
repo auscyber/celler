@@ -43,6 +43,7 @@ use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 use tokio::time;
+use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
@@ -101,10 +102,10 @@ struct RequestStateInner {
     /// header in responses.
     public_cache: AtomicBool,
 
-    /// The root span of the request.
+    /// The span the correlation identifiers live on.
     ///
-    /// Attributes worth slicing whole traces by live here rather than on an
-    /// individual handler's span.
+    /// Dimensions worth slicing whole traces by are recorded here rather than
+    /// on an individual handler's span.
     span: Span,
 }
 
@@ -256,6 +257,11 @@ impl RequestStateInner {
         self.span
             .record("store_path_hash", store_path_hash.as_str());
     }
+
+    /// Records the authenticated user for the whole trace.
+    fn record_user(&self, username: &str) {
+        self.span.record("enduser.id", username);
+    }
 }
 
 /// The fallback route.
@@ -287,6 +293,11 @@ pub async fn run_api_server(cli_listen: Option<SocketAddr>, config: Config) -> R
         .layer(Extension(state.clone()))
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn(correlate_request))
+        // Injects `traceparent`; must sit inside the layer that opens the span.
+        .layer(OtelInResponseLayer)
+        // Opens the request span, continuing the caller's trace when they sent
+        // one, and names it after the matched route rather than the raw path.
+        .layer(OtelAxumLayer::default())
         .layer(CatchPanicLayer::new());
 
     eprintln!("Listening on {:?}...", listen);

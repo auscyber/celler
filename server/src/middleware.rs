@@ -2,17 +2,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use tracing::Instrument;
 use axum::{
     extract::{Extension, Request},
     http::HeaderValue,
     middleware::Next,
     response::Response,
 };
-use tracing::Instrument;
 
 use super::{AuthState, RequestState, RequestStateInner, State};
 use crate::error::{ErrorKind, ServerResult};
-use crate::telemetry;
+use crate::telemetry::{self, Correlation};
 use attic::api::binary_cache::CELLER_CACHE_VISIBILITY;
 
 fn extract_host(req: &Request) -> Option<String> {
@@ -24,14 +24,13 @@ fn extract_host(req: &Request) -> Option<String> {
 
 /// Attaches the correlation identifiers to the request span and the response.
 ///
-/// Runs inside the request span created by [`telemetry::MakeRequestSpan`], so
-/// the op ID it derives is the OpenTelemetry trace ID of that span whenever
-/// export is on.
+/// Runs inside the span `OtelAxumLayer` opens, so the op ID it derives is that
+/// span's OpenTelemetry trace ID — the caller's, when they sent a `traceparent`
+/// for us to continue.
 pub(crate) async fn correlate_request(req: Request, next: Next) -> Response {
-    let span = telemetry::request_span(&req);
-    telemetry::adopt_trace_context(&span, req.headers());
-
-    correlate_inner(req, next).instrument(span).await
+    correlate_inner(req, next)
+        .instrument(telemetry::correlation_span())
+        .await
 }
 
 async fn correlate_inner(mut req: Request, next: Next) -> Response {
@@ -43,16 +42,7 @@ async fn correlate_inner(mut req: Request, next: Next) -> Response {
 
     let mut response = op_id.scope(next.run(req)).await;
 
-    let status = response.status();
-    span.record("http.response.status_code", status.as_u16());
-
-    // Only server-side faults mark the trace as failed; a 404 or a 401 is a
-    // normal outcome of serving a request.
-    if status.is_server_error() {
-        span.record("otel.status_code", "ERROR");
-    }
-
-    telemetry::write_headers(&span, &correlation, response.headers_mut());
+    telemetry::write_headers(&correlation, response.headers_mut());
 
     response
 }
@@ -63,6 +53,12 @@ pub async fn init_request_state(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let span = req
+        .extensions()
+        .get::<Correlation>()
+        .map(|correlation| correlation.span.clone())
+        .unwrap_or_else(tracing::Span::current);
+
     let host = extract_host(&req).unwrap_or_default();
 
     // X-Forwarded-Proto is an untrusted header
@@ -80,7 +76,7 @@ pub async fn init_request_state(
         host,
         client_claims_https,
         public_cache: AtomicBool::new(false),
-        span: tracing::Span::current(),
+        span,
     });
 
     req.extensions_mut().insert(req_state);
