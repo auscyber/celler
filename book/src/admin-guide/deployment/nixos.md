@@ -91,38 +91,47 @@ The server exports spans over OTLP, and returns correlation headers on every res
 - `traceparent`: the W3C trace context of the response. An inbound `traceparent`
   is never adopted — every request starts a fresh root trace.
 
+`settings` is passed through to the server configuration verbatim, so the
+`[tracing]` section is configured there like any other:
+
 ```nix
 {
-  services.cellerd = {
-    # What the server logs to the journal
-    logFilter = "info,attic_server=debug";
+  services.cellerd.settings.tracing = {
+    service-name = "cellerd-prod";
 
-    tracing = {
-      serviceName = "cellerd-prod";
-
-      # What gets exported, independently of logFilter
-      filter = "info";
-
-      otlp = {
-        enable = true;
-        endpoint = "http://otel-collector:4317";
-        protocol = "grpc"; # or "http", conventionally on port 4318
-        sampleRatio = 0.1;
-
-        # Non-secret headers only: these land in the Nix store
-        headers.x-scope-orgid = "celler";
-      };
+    otlp = {
+      enabled = true;
+      endpoint = "http://otel-collector:4317";
+      protocol = "grpc"; # or "http", conventionally on port 4318
+      timeout = "10s";
+      sample-ratio = 0.1;
     };
+  };
+}
+```
+
+Two knobs are read from the environment rather than the configuration file, and
+are set like any other unit environment variable:
+
+```nix
+{
+  systemd.services.cellerd.environment = {
+    # What the server logs to the journal
+    RUST_LOG = "info,attic_server=debug";
+
+    # What gets exported, independently of RUST_LOG. Be careful raising this to
+    # `trace`: the exporter's own HTTP client is instrumented, so exporting its
+    # spans feeds back into itself.
+    CELLER_SERVER_OTEL_FILTER = "info";
   };
 }
 ```
 
 ### Authenticating to the collector
 
-Anything that authenticates must not go in `settings` or `tracing.otlp.headers`,
-because the generated configuration and the unit environment both end up in the
-world-readable Nix store. Put it in an `environmentFile` instead, which systemd
-reads after the unit environment and which therefore wins:
+Both `settings` and the unit environment end up in the world-readable Nix store,
+so nothing that authenticates may go in either. Put it in an `environmentFile`,
+which systemd reads after the unit environment and which therefore wins:
 
 ```
 OTEL_EXPORTER_OTLP_HEADERS="authorization=Basic aW5zdGFuY2U6dG9rZW4="
@@ -142,7 +151,8 @@ alongside the JWT secret:
 
 The exporter honours the standard OTLP environment variables, so
 `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS` and friends
-work from the same files. Leaving `tracing.otlp.endpoint` null defers to them.
+work from the same files. Omitting `endpoint` from `settings.tracing.otlp`
+defers to them.
 
 ## Operations
 

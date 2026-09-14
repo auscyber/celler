@@ -218,9 +218,11 @@ impl Drop for TelemetryGuard {
 /// built: a per-layer filter is assigned its filter ID when the subscriber is
 /// built, so a layer added afterwards has none and panics on first use.
 pub fn init(config: &TracingConfig) -> Result<(OtelLayer, TelemetryGuard)> {
-    let Some(otlp) = &config.otlp else {
+    let otlp = &config.otlp;
+
+    if !otlp.enabled {
         return Ok((Box::new(Identity::new()), TelemetryGuard(None)));
-    };
+    }
 
     let exporter = match otlp.protocol {
         OtlpProtocol::Grpc => {

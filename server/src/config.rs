@@ -314,17 +314,15 @@ pub struct TracingConfig {
     pub service_name: String,
 
     /// OTLP span export.
-    ///
-    /// Export is off unless this table is present.
     #[serde(default)]
-    pub otlp: Option<OtlpConfig>,
+    pub otlp: OtlpConfig,
 }
 
 impl Default for TracingConfig {
     fn default() -> Self {
         Self {
             service_name: default_service_name(),
-            otlp: None,
+            otlp: OtlpConfig::default(),
         }
     }
 }
@@ -333,6 +331,10 @@ impl Default for TracingConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpConfig {
+    /// Whether to export spans to a collector.
+    #[serde(default = "default_otlp_enabled")]
+    pub enabled: bool,
+
     /// The collector endpoint.
     ///
     /// If unset, the standard `OTEL_EXPORTER_OTLP_ENDPOINT` and
@@ -352,6 +354,18 @@ pub struct OtlpConfig {
     /// The fraction of traces to sample, from 0.0 to 1.0.
     #[serde(rename = "sample-ratio", default = "default_otlp_sample_ratio")]
     pub sample_ratio: f64,
+}
+
+impl Default for OtlpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_otlp_enabled(),
+            endpoint: None,
+            protocol: OtlpProtocol::default(),
+            timeout: default_otlp_timeout(),
+            sample_ratio: default_otlp_sample_ratio(),
+        }
+    }
 }
 
 /// The wire protocol used to reach an OTLP collector.
@@ -630,6 +644,10 @@ fn default_default_retention_period() -> Duration {
 
 fn default_service_name() -> String {
     "cellerd".to_string()
+}
+
+fn default_otlp_enabled() -> bool {
+    false
 }
 
 fn default_otlp_timeout() -> Duration {

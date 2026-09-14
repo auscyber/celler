@@ -172,9 +172,12 @@ token-rs256-secret-base64 = "%token_rs256_secret_base64%"
 
 # OTLP span export
 #
-# Export is off unless this table is present. Every request is a fresh
-# root trace; an inbound `traceparent` is never adopted.
+# Every request is a fresh root trace; an inbound `traceparent` is
+# never adopted.
 #[tracing.otlp]
+# Whether to export spans to a collector
+#enabled = false
+
 # The collector endpoint
 #
 # If unset, the standard `OTEL_EXPORTER_OTLP_ENDPOINT` and
