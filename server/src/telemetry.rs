@@ -2,11 +2,12 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use opentelemetry::global;
-use opentelemetry::propagation::Injector;
+use opentelemetry::propagation::{Extractor, Injector};
 use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
@@ -134,6 +135,42 @@ pub struct Correlation {
     pub request_id: RequestId,
 }
 
+/// Whether a caller's `traceparent` may become the parent of a request span.
+///
+/// Process-wide, like the propagator itself: the middleware that needs it runs
+/// outside the layer carrying the server state.
+static ACCEPT_TRACE_CONTEXT: AtomicBool = AtomicBool::new(false);
+
+/// Makes the request span continue the trace the caller started, if there is a
+/// valid one and we are configured to trust it.
+///
+/// Must run before the span is entered: once it has been built its parent can
+/// no longer be changed.
+pub(crate) fn adopt_trace_context(span: &Span, headers: &HeaderMap) {
+    if !ACCEPT_TRACE_CONTEXT.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let parent =
+        global::get_text_map_propagator(|propagator| propagator.extract(&HeaderExtractor(headers)));
+
+    if parent.span().span_context().is_valid() {
+        let _ = span.set_parent(parent);
+    }
+}
+
+struct HeaderExtractor<'a>(&'a HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|name| name.as_str()).collect()
+    }
+}
+
 /// Builds the per-request span that carries the correlation fields.
 pub(crate) fn request_span<B>(request: &axum::http::Request<B>) -> Span {
     let method = request.method();
@@ -218,6 +255,8 @@ impl Drop for TelemetryGuard {
 /// built: a per-layer filter is assigned its filter ID when the subscriber is
 /// built, so a layer added afterwards has none and panics on first use.
 pub fn init(config: &TracingConfig) -> Result<(OtelLayer, TelemetryGuard)> {
+    ACCEPT_TRACE_CONTEXT.store(config.accept_trace_context, Ordering::Relaxed);
+
     let otlp = &config.otlp;
 
     if !otlp.enabled {

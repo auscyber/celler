@@ -313,6 +313,19 @@ pub struct TracingConfig {
     #[serde(rename = "service-name", default = "default_service_name")]
     pub service_name: String,
 
+    /// Whether to continue a trace the caller started.
+    ///
+    /// When enabled, a valid inbound `traceparent` becomes the parent of the
+    /// request span, so a trace spans the caller and this server. The header is
+    /// untrusted input: anyone who can reach the server can then choose the
+    /// trace ID it reports and force it to be sampled. Disable it to make every
+    /// request a fresh root trace.
+    #[serde(
+        rename = "accept-trace-context",
+        default = "default_accept_trace_context"
+    )]
+    pub accept_trace_context: bool,
+
     /// OTLP span export.
     #[serde(default)]
     pub otlp: OtlpConfig,
@@ -322,6 +335,7 @@ impl Default for TracingConfig {
     fn default() -> Self {
         Self {
             service_name: default_service_name(),
+            accept_trace_context: default_accept_trace_context(),
             otlp: OtlpConfig::default(),
         }
     }
@@ -644,6 +658,10 @@ fn default_default_retention_period() -> Duration {
 
 fn default_service_name() -> String {
     "cellerd".to_string()
+}
+
+fn default_accept_trace_context() -> bool {
+    true
 }
 
 fn default_otlp_enabled() -> bool {

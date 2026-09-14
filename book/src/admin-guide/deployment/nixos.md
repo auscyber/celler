@@ -88,8 +88,15 @@ The server exports spans over OTLP, and returns correlation headers on every res
   trace search.
 - `X-Request-Id`: echoed back when the client or a proxy sent one, generated
   otherwise.
-- `traceparent`: the W3C trace context of the response. An inbound `traceparent`
-  is never adopted — every request starts a fresh root trace.
+- `traceparent`: the W3C trace context of the response.
+
+An inbound `traceparent` is adopted by default, so a trace started by a reverse
+proxy or another service continues into the server rather than being cut in two.
+The header is untrusted input, though: anyone who can reach the server directly
+can pick the trace ID it reports and force it to be sampled. If clients reach the
+server without passing through a proxy you control, set
+`settings.tracing.accept-trace-context = false` to make every request a fresh
+root trace instead.
 
 `settings` is passed through to the server configuration verbatim, so the
 `[tracing]` section is configured there like any other:
@@ -98,6 +105,9 @@ The server exports spans over OTLP, and returns correlation headers on every res
 {
   services.cellerd.settings.tracing = {
     service-name = "cellerd-prod";
+
+    # Continue a trace nginx (or anything upstream) started
+    accept-trace-context = true;
 
     otlp = {
       enabled = true;

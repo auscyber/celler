@@ -29,6 +29,7 @@ fn extract_host(req: &Request) -> Option<String> {
 /// export is on.
 pub(crate) async fn correlate_request(req: Request, next: Next) -> Response {
     let span = telemetry::request_span(&req);
+    telemetry::adopt_trace_context(&span, req.headers());
 
     correlate_inner(req, next).instrument(span).await
 }
